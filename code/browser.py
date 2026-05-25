@@ -1,8 +1,9 @@
-python3 -c "
+python3 - << 'EOF'
 import cv2
 import numpy as np
-import os
 import threading
+import time
+import os
 from flask import Flask, Response
 from ultralytics import YOLO
 
@@ -15,375 +16,223 @@ output_frame = None
 lock = threading.Lock()
 
 # =========================
-# キャリブファイル
+# キャリブ
 # =========================
-CALIB_FILE = 'stereo_camera_calibration.npz'
+CALIB_FILE = "stereo_camera_calibration.npz"
 
 if not os.path.exists(CALIB_FILE):
-    print('❌ 補正ファイルが見つかりません！')
+    print("❌ calibration file not found")
     exit()
 
-# =========================
-# キャリブ読み込み
-# =========================
-calib_data = np.load(CALIB_FILE)
+calib = np.load(CALIB_FILE)
 
-map1_l = calib_data['map1_l']
-map2_l = calib_data['map2_l']
-
-map1_r = calib_data['map1_r']
-map2_r = calib_data['map2_r']
+map1_l = calib["map1_l"]
+map2_l = calib["map2_l"]
+map1_r = calib["map1_r"]
+map2_r = calib["map2_r"]
 
 # =========================
 # カメラ
 # =========================
-cap0 = cv2.VideoCapture(0)
-cap2 = cv2.VideoCapture(2)
+capL = cv2.VideoCapture(0)
+capR = cv2.VideoCapture(2)
 
-for cap in [cap0, cap2]:
+for cap in [capL, capR]:
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 # =========================
 # YOLO
 # =========================
-model = YOLO(
-    'yolov8n.engine',
-    task='detect'
-)
-
-# =========================
-# パラメータ
-# =========================
-BASELINE = 0.071
-FOCAL_LENGTH = 630
-ALERT_LIMIT = 0.70
+model = YOLO("yolov8n.pt")
 
 # =========================
 # StereoBM
 # =========================
 stereo = cv2.StereoBM_create(
-    numDisparities=128,
+    numDisparities=96,
     blockSize=15
 )
 
-stereo.setMinDisparity(0)
 stereo.setTextureThreshold(10)
 stereo.setUniquenessRatio(10)
-stereo.setSpeckleWindowSize(150)
-stereo.setSpeckleRange(4)
 
 # =========================
-# メイン処理
+# パラメータ
 # =========================
-def processing_loop():
+BASELINE = 0.071
+FOCAL = 630
 
+# ★スケール（実測補正）
+SCALE = 1.20
+
+# ★距離ゾーン（スケール適用済み）
+NEAR_MIN = 0.35 * SCALE
+NEAR_MAX = 2.3 * SCALE
+
+# =========================
+# フレーム共有
+# =========================
+frameL = None
+frameR = None
+
+# =========================
+# カメラスレッド
+# =========================
+def cam_loop():
+    global frameL, frameR
+
+    while True:
+        retL, l = capL.read()
+        retR, r = capR.read()
+
+        if not retL or not retR:
+            continue
+
+        frameL = l
+        frameR = r
+
+# =========================
+# 処理スレッド
+# =========================
+def process_loop():
     global output_frame
-    global lock
 
     while True:
 
-        # =========================
-        # カメラ取得
-        # =========================
-        ret0, frame0 = cap0.read()
-        ret2, frame2 = cap2.read()
-
-        if not (ret0 and ret2):
+        if frameL is None or frameR is None:
+            time.sleep(0.01)
             continue
 
-        # ====================================
-        # 左右入れ替え
-        # CAM0=右 / CAM2=左 対策
-        # ====================================
-        frame0, frame2 = frame2, frame0
+        left = frameL.copy()
+        right = frameR.copy()
 
-        # =========================
-        # ステレオ補正
-        # =========================
-        rect_left = cv2.remap(
-            frame0,
-            map1_l,
-            map2_l,
-            cv2.INTER_LINEAR
-        )
+        # 左右補正
+        left, right = right, left
 
-        rect_right = cv2.remap(
-            frame2,
-            map1_r,
-            map2_r,
-            cv2.INTER_LINEAR
-        )
+        # キャリブ補正
+        left = cv2.remap(left, map1_l, map2_l, cv2.INTER_LINEAR)
+        right = cv2.remap(right, map1_r, map2_r, cv2.INTER_LINEAR)
 
-        # =========================
-        # グレースケール
-        # =========================
-        gray_left = cv2.cvtColor(
-            rect_left,
-            cv2.COLOR_BGR2GRAY
-        )
+        grayL = cv2.cvtColor(left, cv2.COLOR_BGR2GRAY)
+        grayR = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
 
-        gray_right = cv2.cvtColor(
-            rect_right,
-            cv2.COLOR_BGR2GRAY
-        )
+        disp = stereo.compute(grayL, grayR).astype(np.float32) / 16.0
 
-        # =========================
-        # disparity
-        # =========================
-        disparity = stereo.compute(
-            gray_left,
-            gray_right
-        ).astype(np.float32) / 16.0
+        valid = (disp > 8) & (disp < 128)
 
-        # =========================
-        # 有効視差のみ使用
-        # =========================
-        valid_mask = (
-            (disparity > 2) &
-            (disparity < 128)
-        )
-
-        # =========================
-        # 距離マップ
-        # =========================
-        distance_map = np.ones_like(disparity) * 10.0
-
-        distance_map[valid_mask] = (
-            FOCAL_LENGTH * BASELINE
-        ) / disparity[valid_mask]
-
-        # =========================
-        # 危険ゾーン
-        # =========================
-        zone_mask = (
-            (distance_map > 0.01) &
-            (distance_map <= ALERT_LIMIT)
-        )
+        depth = np.ones_like(disp) * 10
+        depth[valid] = (FOCAL * BASELINE) / disp[valid]
 
         # =========================
         # YOLO
         # =========================
-        results = model.predict(
-            rect_left,
-            classes=[0],
-            device=0,
-            verbose=False
-        )
+        results = model.predict(left, classes=[0], verbose=False)
 
-        draw_frame = rect_left.copy()
-        red_overlay = draw_frame.copy()
+        draw = left.copy()
+        overlay = draw.copy()
 
-        # =========================
-        # 人検知
-        # =========================
         for r in results:
-
             for box in r.boxes:
 
-                x1, y1, x2, y2 = map(
-                    int,
-                    box.xyxy[0]
-                )
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-                # =========================
-                # 中央のみ使用
-                # =========================
-                cx1 = int(
-                    x1 + (x2 - x1) * 0.35
-                )
+                # ROI（中央）
+                cx1 = int(x1 + (x2 - x1) * 0.40)
+                cx2 = int(x1 + (x2 - x1) * 0.60)
+                cy1 = int(y1 + (y2 - y1) * 0.20)
+                cy2 = int(y1 + (y2 - y1) * 0.80)
 
-                cx2 = int(
-                    x1 + (x2 - x1) * 0.65
-                )
+                mask = np.zeros_like(valid, dtype=bool)
+                mask[cy1:cy2, cx1:cx2] = True
 
-                cy1 = int(
-                    y1 + (y2 - y1) * 0.20
-                )
+                vals = depth[mask & valid]
 
-                cy2 = int(
-                    y1 + (y2 - y1) * 0.80
-                )
+                text = "---"
+                color = (0, 255, 0)
 
-                person_mask = np.zeros_like(
-                    zone_mask,
-                    dtype=bool
-                )
+                if len(vals) > 20:
 
-                person_mask[
-                    cy1:cy2,
-                    cx1:cx2
-                ] = True
+                    vals = vals[np.isfinite(vals)]
 
-                # =========================
-                # 危険領域赤塗り
-                # =========================
-                danger_pixel_mask = (
-                    zone_mask &
-                    person_mask
-                )
+                    # ★中央値＋スケール
+                    d = np.median(vals) * SCALE
 
-                red_overlay[
-                    danger_pixel_mask
-                ] = [0, 0, 255]
+                    text = f"{d:.2f}m"
 
-                # =========================
-                # 距離取得
-                # =========================
-                valid_person_distances = distance_map[
-                    person_mask & valid_mask
-                ]
+                    # =========================
+                    # 距離判定（スケール済み）
+                    # =========================
+                    if NEAR_MIN <= d <= NEAR_MAX:
+                        color = (0, 0, 255)   # 赤（危険）
+                    elif d < NEAR_MIN:
+                        color = (255, 255, 0) # 黄（近すぎ）
+                    else:
+                        color = (0, 255, 0)   # 緑
 
-                dist_text = '--- m'
-                box_color = (0, 255, 0)
+                # 枠
+                cv2.rectangle(draw, (x1, y1), (x2, y2), color, 2)
 
-                # =========================
-                # 距離計算
-                # =========================
-                if len(valid_person_distances) > 30:
+                # 距離表示
+                w, h = 90, 30
+                tx1 = x2 - w
+                ty1 = y1
+                tx2 = x2
+                ty2 = y1 + h
 
-                    measured_dist = np.percentile(
-                        valid_person_distances,
-                        30
-                    )
+                cv2.rectangle(draw, (tx1, ty1), (tx2, ty2), (0, 0, 0), -1)
 
-                    dist_text = (
-                        f'{measured_dist:.2f}m'
-                    )
-
-                    if measured_dist <= ALERT_LIMIT:
-                        box_color = (0, 0, 255)
-
-                # =========================
-                # 人物枠
-                # =========================
-                cv2.rectangle(
-                    draw_frame,
-                    (x1, y1),
-                    (x2, y2),
-                    box_color,
-                    2
-                )
-
-                # =========================
-                # 測定エリア表示
-                # =========================
-                cv2.rectangle(
-                    draw_frame,
-                    (cx1, cy1),
-                    (cx2, cy2),
-                    (255, 255, 0),
-                    1
-                )
-
-                # =========================
-                # テキスト位置
-                # =========================
-                text_y = (
-                    y1 - 10
-                    if y1 > 30
-                    else y1 + 25
-                )
-
-                # 黒縁
                 cv2.putText(
-                    draw_frame,
-                    dist_text,
-                    (x1 + 5, text_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 0),
-                    4,
-                    cv2.LINE_AA
-                )
-
-                # 白文字
-                cv2.putText(
-                    draw_frame,
-                    dist_text,
-                    (x1 + 5, text_y),
+                    draw,
+                    text,
+                    (tx1 + 5, ty2 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
                     (255, 255, 255),
-                    2,
-                    cv2.LINE_AA
+                    2
                 )
 
-        # =========================
-        # 半透明合成
-        # =========================
-        cv2.addWeighted(
-            red_overlay,
-            0.5,
-            draw_frame,
-            0.5,
-            0,
-            draw_frame
-        )
+        out = cv2.addWeighted(draw, 0.5, overlay, 0.5, 0)
 
-        # =========================
-        # 出力フレーム更新
-        # =========================
         with lock:
-            output_frame = draw_frame.copy()
+            output_frame = out.copy()
 
 # =========================
-# Flask配信
+# Flask
 # =========================
-@app.route('/')
+def gen():
+    global output_frame
 
+    while True:
+        with lock:
+            if output_frame is None:
+                continue
+
+            _, buf = cv2.imencode(".jpg", output_frame)
+            frame = buf.tobytes()
+
+        yield (b"--frame\r\n"
+               b"Content-Type: image/jpeg\r\n\r\n" +
+               frame + b"\r\n")
+
+@app.route("/")
 def index():
-
-    def stream():
-
-        while True:
-
-            with lock:
-
-                if output_frame is None:
-                    continue
-
-                ret, buffer = cv2.imencode(
-                    '.jpg',
-                    output_frame
-                )
-
-                if not ret:
-                    continue
-
-                frame_bytes = buffer.tobytes()
-
-            yield (
-                b'--frame\r\n'
-                b'Content-Type: image/jpeg\r\n\r\n'
-                + frame_bytes +
-                b'\r\n'
-            )
-
-    return Response(
-        stream(),
-        mimetype='multipart/x-mixed-replace; boundary=frame'
-    )
+    return Response(gen(),
+        mimetype="multipart/x-mixed-replace; boundary=frame")
 
 # =========================
-# 起動
+# MAIN
 # =========================
-if __name__ == '__main__':
+if __name__ == "__main__":
 
-    t = threading.Thread(
-        target=processing_loop,
-        daemon=True
-    )
+    t1 = threading.Thread(target=cam_loop, daemon=True)
+    t2 = threading.Thread(target=process_loop, daemon=True)
 
-    t.start()
+    t1.start()
+    t2.start()
 
-    print('🚀 LAN配信サーバー起動')
-    print('➡ ポート : 5000')
+    print("🚀 RUNNING SYSTEM (SCALE ENABLED)")
+    print("➡ http://192.168.1.10:5000")
 
-    app.run(
-        host='0.0.0.0',
-        port=5000,
-        debug=False,
-        threaded=True
-    )
-"
+    app.run(host="0.0.0.0", port=5000, threaded=True)
+EOF
