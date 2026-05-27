@@ -30,10 +30,10 @@ https://developer.nvidia.com/embedded/jetpack-sdk-62
 
 - For Jetson Orin Nano Developer Kit currently running JetPack 6.x
 
-⚠️AI情報では、新品未開封品はJetPack 5.1.3をインストール後にファームウェアのアップデートを行い、JetPack 6.xへの移行と誘導される。
-　 今回は、ファームフェアが最新状態だったのかJetPack5.1.3では動かずにJetPack6.2で動作した。
-　 イメージのバージョンを間違えても壊れることありません。
-　 上手く起動しない場合は、別のバージョンで試してください。
+# ⚠️注意  
+　AI情報では、新品未開封品はJetPack 5.1.3をインストール後にファームウェアのアップデートを行い、JetPack 6.xへの移行と誘導された。  
+　今回は、購入時点でファームフェアが最新状態だったのかJetPack5.1.3では動かずにJetPack6.2で動作した。  
+　イメージのバージョンを間違えても壊れることありません。上手く起動しない場合は、別のバージョンで試してください。
 
 ---
 
