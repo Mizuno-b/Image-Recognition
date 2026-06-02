@@ -62,7 +62,7 @@ FX3S（三菱PLC）の入力回路への信号伝達にPC817を使用。
 
 M5StickのGPIOは数mA以上を直接出力できるため、PC817のLEDを問題なく駆動できた。
 
-![動作回路図](images/Lift safety devices.png)
+![動作回路図](images/Liftsafetydevices.png)
 
 ---
 
