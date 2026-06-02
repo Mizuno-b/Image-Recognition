@@ -1,5 +1,4 @@
 xhost +local:docker
-
 sudo docker run --runtime nvidia -it --rm \
     --network host \
     --ipc=host \
@@ -12,7 +11,8 @@ sudo docker run --runtime nvidia -it --rm \
     -v /tmp/.X11-unix:/tmp/.X11-unix \
     -v $HOME/.Xauthority:/root/.Xauthority \
     -v /home/mizuno/stereo_camera_calibration.npz:/workspace/stereo_camera_calibration.npz \
+    -v /home/mizuno/Desktop/image-recognition/code:/workspace/code \
     -e DISPLAY=$DISPLAY \
     -e XAUTHORITY=/root/.Xauthority \
-    -e PYTORCH_NVML_DISABLE=1 \
+    -e PYTORCH_NVML_BASED=1 \
     my_yolo_env:v4_gpio
