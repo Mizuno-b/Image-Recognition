@@ -1,0 +1,1 @@
+python3 /workspace/code/main.py
