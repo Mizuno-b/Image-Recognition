@@ -31,6 +31,8 @@ Jetson Orin Nano を用いて、以下を実現するシステムを段階的に
 
 # 3. システム全体構成
 
+![システム全体構成](images/Systemconfiguration.png)
+
 ## ハードウェア構成
 
 ### 使用デバイス
